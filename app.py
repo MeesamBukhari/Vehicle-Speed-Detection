@@ -17,7 +17,6 @@ uploaded_file = st.file_uploader("Choose a video file...", type=["mp4", "avi", "
 
 if uploaded_file is not None:
     # Save uploaded file to a temporary file
-    # OpenCV needs a file path, not a file buffer
     tfile = tempfile.NamedTemporaryFile(delete=False)
     tfile.write(uploaded_file.read())
     video_path = tfile.name
@@ -44,7 +43,14 @@ if uploaded_file is not None:
             st.error("Error: Could not open video file.")
         else:
             fps = cap.get(cv2.CAP_PROP_FPS)
+            # Ensure total_frames is not zero to avoid division by zero
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames == 0:
+                st.error("Error: Could not get video frame count. Is the video file valid?")
+                cap.release()
+                os.remove(video_path)
+                st.stop()
+                
             frame_count = 0
 
             # KERNALS
@@ -54,19 +60,23 @@ if uploaded_file is not None:
             fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
 
             # Progress bar
-            progress_bar = st.progress(0)
+            progress_bar = st.progress(0, text="Processing video...")
 
             while cap.isOpened():
                 ret, frame = cap.read()
 
                 if not ret:
-                    st.write("Video processing finished.")
                     break  # End of video
 
                 frame_count += 1
 
                 # --- Processing Logic ---
-                frame = cv2.resize(frame, None, fx=0.5, fy=0.5)
+                try:
+                    frame = cv2.resize(frame, None, fx=0.5, fy=0.5)
+                except cv2.error as e:
+                    st.warning(f"Could not resize frame {frame_count}. Skipping. Error: {e}")
+                    continue
+                    
                 height, width, _ = frame.shape
                 roi = frame[50:540, 200:960]
 
@@ -93,8 +103,6 @@ if uploaded_file is not None:
                 for box_id in boxes_ids:
                     x, y, w, h, id = box_id
 
-                    # We wrap this in a try-except block in case tracker methods
-                    # fail unexpectedly (e.g., ID not found)
                     try:
                         s = tracker.getsp(id)
                         if (s < tracker.limit()):
@@ -107,7 +115,6 @@ if uploaded_file is not None:
                         if (tracker.f[id] == 1 and s != 0):
                             tracker.capture(roi, x, y, h, w, s, id)
                     except Exception as e:
-                        # Log a warning to the Streamlit app if tracking fails for an object
                         st.warning(f"Error processing object ID {id}: {e}")
 
 
@@ -130,14 +137,13 @@ if uploaded_file is not None:
                 cv2.line(roi, (0, 26), (960, 26), (255, 255, 255), 2)
                 
                 # --- STREAMLIT DISPLAY ---
-                # Replaces cv2.imshow()
-                # We use channels="BGR" because OpenCV reads in BGR format
                 st_frame.image(roi, channels="BGR", use_column_width=True)
                 
                 # Update progress bar
-                progress_bar.progress(frame_count / total_frames)
+                progress_bar.progress(frame_count / total_frames, text=f"Processing video... ({frame_count}/{total_frames})")
 
             # --- AFTER THE LOOP ---
+            progress_bar.progress(1.0, text="Processing complete!")
             st.success("Video processing complete!")
             
             # Clean up
@@ -145,27 +151,24 @@ if uploaded_file is not None:
             os.remove(video_path) # Delete the temporary file
 
             # Final tracker calls
-            tracker.end()
+            tracker.end() # This just passes, but we call it to be safe
             ids_lst, spd_lst = tracker.dataset()
 
             # --- DISPLAY RESULTS ---
             st_results_title.subheader("📊 Processing Results")
-            st_results_data.dataframe({"Vehicle ID": ids_lst, "Speed (km/h)": spd_lst})
-            
-            st_results_plot_info.info(
-                "**Note on Visualization:** The original `datavis` function (which likely uses "
-                "`plt.show()`) is not compatible with Streamlit. \n\n"
-                "To display your plot here, modify your `datavis` function in `objTracker.py` "
-                "to **return the matplotlib figure object** (e.g., `return fig`). "
-                "Then, you can uncomment the lines below to display it."
-            )
-
-            # --- Code to display the plot (if datavis is modified) ---
-            # try:
-            #     fig = tracker.datavis(ids_lst, spd_lst)
-            #     if fig:
-            #         st_results_plot.pyplot(fig)
-            #     else:
-            #         st_results_plot.warning("`datavis` did not return a figure object.")
-            # except Exception as e:
-            #     st_results_plot.error(f"Error calling datavis: {e}")
+            if ids_lst and spd_lst:
+                st_results_data.dataframe({"Vehicle ID": ids_lst, "Speed (px/s)": spd_lst})
+                
+                # --- Display the plot ---
+                # This section is now active
+                st_results_plot_info.info("Note: Speed is calculated in pixels/second (px/s) based on the detection lines.")
+                try:
+                    fig = tracker.datavis(ids_lst, spd_lst)
+                    if fig:
+                        st_results_plot.pyplot(fig)
+                    else:
+                        st_results_plot.warning("`datavis` did not return a figure object.")
+                except Exception as e:
+                    st_results_plot.error(f"Error calling datavis: {e}")
+            else:
+                st_results_data.warning("No vehicles were tracked successfully.")
