@@ -1,0 +1,171 @@
+# PACKAGES
+import streamlit as st
+import cv2
+import datetime
+import numpy as np
+import tempfile
+import os
+from objTracker import * # IMPORTANT: objTracker.py must be in the same directory
+
+# --- STREAMLIT APP CONFIGURATION ---
+st.set_page_config(page_title="Vehicle Speed Tracker", layout="wide")
+st.title("🚗 Vehicle Speed Tracker")
+st.info("Upload a traffic video to begin processing. The processed video will be displayed below.")
+
+# --- FILE UPLOADER ---
+uploaded_file = st.file_uploader("Choose a video file...", type=["mp4", "avi", "mov"])
+
+if uploaded_file is not None:
+    # Save uploaded file to a temporary file
+    # OpenCV needs a file path, not a file buffer
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_file.read())
+    video_path = tfile.name
+
+    # --- START PROCESSING BUTTON ---
+    if st.button("Start Processing"):
+        
+        # Placeholder for the video feed
+        st_frame = st.empty()
+        # Placeholder for results
+        st_results_title = st.empty()
+        st_results_data = st.empty()
+        st_results_plot_info = st.empty()
+        st_results_plot = st.empty()
+
+        # --- ORIGINAL SCRIPT LOGIC ---
+        
+        # TRACKER OBJ
+        tracker = EuclideanDistTracker()
+
+        # CAPTURE INPUT VIDEO STREAM
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            st.error("Error: Could not open video file.")
+        else:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frame_count = 0
+
+            # KERNALS
+            kernalOp = np.ones((3, 3), np.uint8)
+            kernalCl = np.ones((11, 11), np.uint8)
+            kernalEr = np.ones((5, 5), np.uint8)
+            fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
+
+            # Progress bar
+            progress_bar = st.progress(0)
+
+            while cap.isOpened():
+                ret, frame = cap.read()
+
+                if not ret:
+                    st.write("Video processing finished.")
+                    break  # End of video
+
+                frame_count += 1
+
+                # --- Processing Logic ---
+                frame = cv2.resize(frame, None, fx=0.5, fy=0.5)
+                height, width, _ = frame.shape
+                roi = frame[50:540, 200:960]
+
+                # MASKING
+                fgmask = fgbg.apply(roi)
+                ret, binImg = cv2.threshold(fgmask, 200, 255, cv2.THRESH_BINARY)
+                opening = cv2.morphologyEx(binImg, cv2.MORPH_OPEN, kernalOp)
+                closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernalCl)
+                er_img = cv2.erode(closing, kernalEr)
+
+                # CONTOURS & BOUNDING BOX
+                contours, _ = cv2.findContours(er_img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                detections = []
+
+                for cnt in contours:
+                    area = cv2.contourArea(cnt)
+                    if area > 1000:
+                        x, y, w, h = cv2.boundingRect(cnt)
+                        cv2.rectangle(roi, (x, y), (x + w, y + h), (0, 255, 0), 3)
+                        detections.append([x, y, w, h])
+
+                # OBJ TRACKING
+                boxes_ids = tracker.update(detections)
+                for box_id in boxes_ids:
+                    x, y, w, h, id = box_id
+
+                    # We wrap this in a try-except block in case tracker methods
+                    # fail unexpectedly (e.g., ID not found)
+                    try:
+                        s = tracker.getsp(id)
+                        if (s < tracker.limit()):
+                            cv2.putText(roi, str(id) + " " + str(s), (x, y - 15), cv2.FONT_HERSHEY_PLAIN, 1, (0, 0, 0), 2)
+                            cv2.rectangle(roi, (x, y), (x + w, y + h), (0, 255, 0), 3)
+                        else:
+                            cv2.putText(roi, str(id) + " " + str(s), (x, y - 15), cv2.FONT_HERSHEY_PLAIN, 1, (0, 0, 0), 2)
+                            cv2.rectangle(roi, (x, y), (x + w, y + h), (0, 0, 255), 3)
+
+                        if (tracker.f[id] == 1 and s != 0):
+                            tracker.capture(roi, x, y, h, w, s, id)
+                    except Exception as e:
+                        # Log a warning to the Streamlit app if tracking fails for an object
+                        st.warning(f"Error processing object ID {id}: {e}")
+
+
+                # DRAW LINES
+                cv2.line(roi, (0, 410), (960, 410), (255, 0, 0), 2)
+                cv2.putText(roi, 'START', (2, 425), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                cv2.line(roi, (0, 430), (960, 430), (255, 0, 0), 2)
+                cv2.line(roi, (0, 235), (960, 235), (255, 0, 0), 2)
+                cv2.putText(roi, 'END', (2, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                cv2.line(roi, (0, 255), (960, 255), (255, 0, 0), 2)
+
+                # DISPLAY DATE, TIME, FPS & CURRENT FRAME
+                cv2.line(roi, (0, 10), (960, 10), (79, 79, 47), 30)
+                d = str(datetime.datetime.now().strftime("%d-%m-%y"))
+                t = str(datetime.datetime.now().strftime("%H-%M-%S"))
+                cv2.putText(roi, f'DATE: {d} |', (25, 19), cv2.FONT_HERSHEY_PLAIN, 1.1, (255, 255, 255), 2)
+                cv2.putText(roi, f'TIME: {t} |', (209, 19), cv2.FONT_HERSHEY_PLAIN, 1.1, (255, 255, 255), 2)
+                cv2.putText(roi, f'FPS: {fps:.2f} |', (393, 19), cv2.FONT_HERSHEY_PLAIN, 1.1, (255, 255, 255), 2)
+                cv2.putText(roi, f'FRAMES: {frame_count} of {total_frames} ', (510, 19), cv2.FONT_HERSHEY_PLAIN, 1.1, (255, 255, 255), 2)
+                cv2.line(roi, (0, 26), (960, 26), (255, 255, 255), 2)
+                
+                # --- STREAMLIT DISPLAY ---
+                # Replaces cv2.imshow()
+                # We use channels="BGR" because OpenCV reads in BGR format
+                st_frame.image(roi, channels="BGR", use_column_width=True)
+                
+                # Update progress bar
+                progress_bar.progress(frame_count / total_frames)
+
+            # --- AFTER THE LOOP ---
+            st.success("Video processing complete!")
+            
+            # Clean up
+            cap.release()
+            os.remove(video_path) # Delete the temporary file
+
+            # Final tracker calls
+            tracker.end()
+            ids_lst, spd_lst = tracker.dataset()
+
+            # --- DISPLAY RESULTS ---
+            st_results_title.subheader("📊 Processing Results")
+            st_results_data.dataframe({"Vehicle ID": ids_lst, "Speed (km/h)": spd_lst})
+            
+            st_results_plot_info.info(
+                "**Note on Visualization:** The original `datavis` function (which likely uses "
+                "`plt.show()`) is not compatible with Streamlit. \n\n"
+                "To display your plot here, modify your `datavis` function in `objTracker.py` "
+                "to **return the matplotlib figure object** (e.g., `return fig`). "
+                "Then, you can uncomment the lines below to display it."
+            )
+
+            # --- Code to display the plot (if datavis is modified) ---
+            # try:
+            #     fig = tracker.datavis(ids_lst, spd_lst)
+            #     if fig:
+            #         st_results_plot.pyplot(fig)
+            #     else:
+            #         st_results_plot.warning("`datavis` did not return a figure object.")
+            # except Exception as e:
+            #     st_results_plot.error(f"Error calling datavis: {e}")
