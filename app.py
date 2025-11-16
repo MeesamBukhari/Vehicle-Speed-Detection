@@ -10,7 +10,34 @@ from objTracker import * # IMPORTANT: objTracker.py must be in the same director
 # --- STREAMLIT APP CONFIGURATION ---
 st.set_page_config(page_title="Vehicle Speed Tracker", layout="wide")
 st.title("🚗 Vehicle Speed Tracker")
-st.info("Upload a traffic video to begin processing. The processed video will be displayed below.")
+st.info("Upload a traffic video, adjust the tuning parameters in the sidebar, then click 'Start Processing'.")
+
+# --- SIDEBAR FOR TUNING ---
+st.sidebar.header("⚙️ Tuning Parameters")
+st.sidebar.info(
+    "Adjust these values if no vehicles are being detected. "
+    "Every video requires different settings."
+)
+
+# --- NEW: DEBUG CHECKBOX ---
+debug_mask = st.sidebar.checkbox("Show Debug Mask")
+st.sidebar.caption(
+    "Check this box to see the black & white mask. "
+    "Your goal is to make vehicles appear as solid white shapes."
+)
+
+thresh_value = st.sidebar.slider("1. Binary Threshold Value", 0, 255, 200)
+st.sidebar.caption(
+    "Lower this value if vehicles are not appearing on the debug mask. "
+    "Try values between 50-150."
+)
+
+area_value = st.sidebar.slider("2. Minimum Contour Area", 100, 5000, 1000)
+st.sidebar.caption(
+    "Increase this to filter out small noise. "
+    "Decrease it if small vehicles are being missed."
+)
+
 
 # --- FILE UPLOADER ---
 uploaded_file = st.file_uploader("Choose a video file...", type=["mp4", "avi", "mov"])
@@ -48,7 +75,8 @@ if uploaded_file is not None:
             if total_frames == 0:
                 st.error("Error: Could not get video frame count. Is the video file valid?")
                 cap.release()
-                os.remove(video_path)
+                if os.path.exists(video_path):
+                    os.remove(video_path)
                 st.stop()
                 
             frame_count = 0
@@ -56,7 +84,7 @@ if uploaded_file is not None:
             # KERNALS
             kernalOp = np.ones((3, 3), np.uint8)
             kernalCl = np.ones((11, 11), np.uint8)
-            kernalEr = np.ones((5, 5), np.uint8)
+            # kernalEr = np.ones((5, 5), np.uint8) # This was removed
             fgbg = cv2.createBackgroundSubtractorMOG2(detectShadows=True)
 
             # Progress bar
@@ -82,19 +110,28 @@ if uploaded_file is not None:
 
                 # MASKING
                 fgmask = fgbg.apply(roi)
-                ret, binImg = cv2.threshold(fgmask, 200, 255, cv2.THRESH_BINARY)
+                
+                # --- USE SLIDER VALUE FOR THRESHOLD ---
+                ret, binImg = cv2.threshold(fgmask, thresh_value, 255, cv2.THRESH_BINARY)
+                
                 opening = cv2.morphologyEx(binImg, cv2.MORPH_OPEN, kernalOp)
                 closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernalCl)
-                er_img = cv2.erode(closing, kernalEr)
+                
+                # --- MODIFIED: Removed erode step ---
+                # We find contours on the 'closing' image, which is more robust
+                processed_mask = closing
 
                 # CONTOURS & BOUNDING BOX
-                contours, _ = cv2.findContours(er_img, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                contours, _ = cv2.findContours(processed_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
                 detections = []
 
                 for cnt in contours:
                     area = cv2.contourArea(cnt)
-                    if area > 1000:
+                    
+                    # --- USE SLIDER VALUE FOR AREA ---
+                    if area > area_value:
                         x, y, w, h = cv2.boundingRect(cnt)
+                        # Draw detection rectangle on the original 'roi'
                         cv2.rectangle(roi, (x, y), (x + w, y + h), (0, 255, 0), 3)
                         detections.append([x, y, w, h])
 
@@ -137,7 +174,12 @@ if uploaded_file is not None:
                 cv2.line(roi, (0, 26), (960, 26), (255, 255, 255), 2)
                 
                 # --- STREAMLIT DISPLAY ---
-                st_frame.image(roi, channels="BGR", use_column_width=True)
+                if debug_mask:
+                    # Show the black & white mask to help with tuning
+                    st_frame.image(processed_mask, use_column_width=True)
+                else:
+                    # Show the final video with bounding boxes
+                    st_frame.image(roi, channels="BGR", use_column_width=True)
                 
                 # Update progress bar
                 progress_bar.progress(frame_count / total_frames, text=f"Processing video... ({frame_count}/{total_frames})")
@@ -148,7 +190,8 @@ if uploaded_file is not None:
             
             # Clean up
             cap.release()
-            os.remove(video_path) # Delete the temporary file
+            if os.path.exists(video_path):
+                os.remove(video_path) # Delete the temporary file
 
             # Final tracker calls
             tracker.end() # This just passes, but we call it to be safe
@@ -160,7 +203,6 @@ if uploaded_file is not None:
                 st_results_data.dataframe({"Vehicle ID": ids_lst, "Speed (px/s)": spd_lst})
                 
                 # --- Display the plot ---
-                # This section is now active
                 st_results_plot_info.info("Note: Speed is calculated in pixels/second (px/s) based on the detection lines.")
                 try:
                     fig = tracker.datavis(ids_lst, spd_lst)
